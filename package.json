@@ -1,0 +1,11 @@
+{
+  "name": "skibidri-code",
+  "version": "1.0.0",
+  "description": "Skibidri Code Bot - AI coding assistant via Groq DeepSeek R1",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": {
+    "axios": "^1.7.0",
+    "discord.js": "^14.0.0"
+  }
+}
