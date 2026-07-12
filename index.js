@@ -7,7 +7,7 @@ const {
 const axios = require("axios");
 const fs = require("fs");
 const path = require("path");
-const { App } = require("@octokit/app");
+const { createAppAuth } = require("@octokit/auth-app");
 const { Octokit } = require("@octokit/rest");
 
 const TOKEN = process.env.DISCORD_TOKEN_CODE;
@@ -15,7 +15,16 @@ const CLIENT_ID = process.env.CLIENT_ID_CODE;
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GITHUB_APP_ID = process.env.GITHUB_APP_ID;
 const GITHUB_INSTALLATION_ID = process.env.GITHUB_INSTALLATION_ID;
-const GITHUB_PRIVATE_KEY = process.env.GITHUB_PRIVATE_KEY?.replace(/\\n/g, "\n");
+
+let GITHUB_PRIVATE_KEY = null;
+const PEM_FILE = path.join(__dirname, "private-key.pem");
+if (fs.existsSync(PEM_FILE)) {
+  GITHUB_PRIVATE_KEY = fs.readFileSync(PEM_FILE, "utf8");
+} else if (process.env.GITHUB_PRIVATE_KEY) {
+  GITHUB_PRIVATE_KEY = process.env.GITHUB_PRIVATE_KEY
+    .replace(/\|/g, "\n")
+    .replace(/\\n/g, "\n");
+}
 
 const GROQ_API = "https://api.groq.com/openai/v1/chat/completions";
 const MODEL = "llama-3.3-70b-versatile";
@@ -27,9 +36,14 @@ async function getOctokit() {
   if (octokit) return octokit;
   if (!GITHUB_APP_ID || !GITHUB_PRIVATE_KEY || !GITHUB_INSTALLATION_ID) return null;
 
-  const app = new App({ appId: GITHUB_APP_ID, privateKey: GITHUB_PRIVATE_KEY });
-  const installationOctokit = await app.getInstallationOctokit(parseInt(GITHUB_INSTALLATION_ID));
-  octokit = installationOctokit;
+  const auth = createAppAuth({
+    appId: GITHUB_APP_ID,
+    privateKey: GITHUB_PRIVATE_KEY,
+    installationId: parseInt(GITHUB_INSTALLATION_ID),
+  });
+
+  const { token } = await auth({ type: "installation" });
+  octokit = new Octokit({ auth: token });
   return octokit;
 }
 
