@@ -84,12 +84,29 @@ async function buildHomePanel(githubUsername = null) {
   return { embeds: [embed], components: [row1, row2] };
 }
 
-// ─── GitHub App Auth ─────────────────────────────────────────────────────────
-let octokit = null;
+// ─── User PAT Storage ─────────────────────────────────────────────────────────
+const TOKENS_FILE = path.join(__dirname, "tokens.json");
+function loadTokens() {
+  try { if (!fs.existsSync(TOKENS_FILE)) fs.writeFileSync(TOKENS_FILE, "{}"); return JSON.parse(fs.readFileSync(TOKENS_FILE)); } catch { return {}; }
+}
+function saveTokens(data) { fs.writeFileSync(TOKENS_FILE, JSON.stringify(data, null, 2)); }
+function getUserToken(userId) { return loadTokens()[userId] || null; }
+function setUserToken(userId, token) { const t = loadTokens(); t[userId] = token; saveTokens(t); }
+function removeUserToken(userId) { const t = loadTokens(); delete t[userId]; saveTokens(t); }
 
-async function getOctokit() {
-  if (octokit) return octokit;
+// ─── GitHub Auth (PAT หรือ App) ───────────────────────────────────────────────
+let appOctokit = null;
+
+async function getOctokit(userId = null) {
+  // ลองใช้ PAT ของ user ก่อน
+  if (userId) {
+    const pat = getUserToken(userId);
+    if (pat) return new Octokit({ auth: pat });
+  }
+
+  // fallback เป็น GitHub App
   if (!GITHUB_APP_ID || !GITHUB_PRIVATE_KEY || !GITHUB_INSTALLATION_ID) return null;
+  if (appOctokit) return appOctokit;
 
   const auth = createAppAuth({
     appId: GITHUB_APP_ID,
@@ -98,44 +115,42 @@ async function getOctokit() {
   });
 
   const { token } = await auth({ type: "installation" });
-  octokit = new Octokit({ auth: token });
-  return octokit;
+  appOctokit = new Octokit({ auth: token });
+  return appOctokit;
 }
 
-async function ghReadFile(owner, repo, filePath) {
-  const kit = await getOctokit();
-  if (!kit) throw new Error("GitHub App ไม่ได้ตั้งค่า");
+async function ghReadFile(owner, repo, filePath, userId = null) {
+  const kit = await getOctokit(userId);
+  if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
   const res = await kit.repos.getContent({ owner, repo, path: filePath });
   const content = Buffer.from(res.data.content, "base64").toString("utf8");
   return { content, sha: res.data.sha };
 }
 
-async function ghWriteFile(owner, repo, filePath, content, sha, message = "Update via Skibidri Code") {
-  const kit = await getOctokit();
-  if (!kit) throw new Error("GitHub App ไม่ได้ตั้งค่า");
-  await kit.repos.createOrUpdateFileContents({
-    owner, repo, path: filePath,
-    message,
-    content: Buffer.from(content).toString("base64"),
-    sha,
-  });
+async function ghWriteFile(owner, repo, filePath, content, sha, message = "Update via Skibidri Code", userId = null) {
+  const kit = await getOctokit(userId);
+  if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
+  await kit.repos.createOrUpdateFileContents({ owner, repo, path: filePath, message, content: Buffer.from(content).toString("base64"), sha });
 }
 
-async function ghCreateFile(owner, repo, filePath, content, message = "Create via Skibidri Code") {
-  const kit = await getOctokit();
-  if (!kit) throw new Error("GitHub App ไม่ได้ตั้งค่า");
-  await kit.repos.createOrUpdateFileContents({
-    owner, repo, path: filePath,
-    message,
-    content: Buffer.from(content).toString("base64"),
-  });
+async function ghCreateFile(owner, repo, filePath, content, message = "Create via Skibidri Code", userId = null) {
+  const kit = await getOctokit(userId);
+  if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
+  await kit.repos.createOrUpdateFileContents({ owner, repo, path: filePath, message, content: Buffer.from(content).toString("base64") });
 }
 
-async function ghListFiles(owner, repo, dirPath = "") {
-  const kit = await getOctokit();
-  if (!kit) throw new Error("GitHub App ไม่ได้ตั้งค่า");
+async function ghListFiles(owner, repo, dirPath = "", userId = null) {
+  const kit = await getOctokit(userId);
+  if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
   const res = await kit.repos.getContent({ owner, repo, path: dirPath });
   return Array.isArray(res.data) ? res.data : [res.data];
+}
+
+async function ghListRepos(userId = null) {
+  const kit = await getOctokit(userId);
+  if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
+  const res = await kit.repos.listForAuthenticatedUser({ per_page: 30, sort: "updated" });
+  return res.data;
 }
 
 // ─── Groq API ─────────────────────────────────────────────────────────────────
@@ -206,6 +221,10 @@ const commands = [
     .addStringOption(o => o.setName("repo").setDescription("owner/repo เช่น Boxxland/6").setRequired(true))
     .addStringOption(o => o.setName("path").setDescription("path ไฟล์ เช่น index.js").setRequired(true)),
 
+  new SlashCommandBuilder().setName("gh-login").setDescription("เชื่อมบัญชี GitHub ด้วย Personal Access Token"),
+  new SlashCommandBuilder().setName("gh-logout").setDescription("ตัดการเชื่อมต่อ GitHub"),
+  new SlashCommandBuilder().setName("gh-repos").setDescription("ดูรายการ repo ของคุณ"),
+  new SlashCommandBuilder().setName("gh-setup").setDescription("วิธีเชื่อม GitHub App กับ Skibidri Code"),
   new SlashCommandBuilder().setName("gh-list").setDescription("ดูไฟล์ใน GitHub repo")
     .addStringOption(o => o.setName("repo").setDescription("owner/repo").setRequired(true))
     .addStringOption(o => o.setName("path").setDescription("folder path (ว่างคือ root)").setRequired(false)),
@@ -306,6 +325,29 @@ client.on("interactionCreate", async (interaction) => {
   // ── Modal Handlers ────────────────────────────────────────────────────────
   if (interaction.isModalSubmit()) {
     await interaction.deferReply();
+
+    if (interaction.customId === "modal_ghlogin") {
+      const pat = interaction.fields.getTextInputValue("pat").trim();
+      try {
+        // ทดสอบ token ก่อน
+        const testKit = new Octokit({ auth: pat });
+        const { data } = await testKit.users.getAuthenticated();
+        setUserToken(interaction.user.id, pat);
+        return interaction.editReply({ ephemeral: true, embeds: [new EmbedBuilder()
+          .setColor(0x57f287)
+          .setTitle("✅ เชื่อม GitHub สำเร็จ!")
+          .setThumbnail(data.avatar_url)
+          .addFields(
+            { name: "👤 บัญชี", value: `[${data.login}](${data.html_url})`, inline: true },
+            { name: "📁 Repos", value: `${data.public_repos} public`, inline: true },
+          )
+          .setFooter({ text: "Token เก็บไว้ local ไม่มีใครเห็นครับ" })
+          .setTimestamp()
+        ]});
+      } catch (err) {
+        return interaction.editReply({ ephemeral: true, content: "❌ Token ไม่ถูกต้องหรือหมดอายุแล้วครับ กรุณาสร้าง token ใหม่" });
+      }
+    }
 
     if (interaction.customId === "modal_codenow") {
       const repoFull = interaction.fields.getTextInputValue("repo");
@@ -433,18 +475,87 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (commandName === "help") {
+    const ghReady = !!(GITHUB_APP_ID && GITHUB_PRIVATE_KEY && GITHUB_INSTALLATION_ID);
     return interaction.editReply({ embeds: [new EmbedBuilder().setColor(0x5865f2).setTitle("💻 Skibidri Code").setDescription(`โมเดล: \`${MODEL}\` via Groq`).addFields(
+      { name: "🏠 /home", value: "หน้าหลัก + ปุ่มลัดทุกอย่าง" },
       { name: "💻 /code <prompt>", value: "เขียนโค้ด" },
       { name: "🐛 /debug <code>", value: "Debug โค้ด" },
       { name: "📖 /explain <code>", value: "อธิบายโค้ด" },
       { name: "🔍 /review <code>", value: "รีวิวโค้ด" },
       { name: "❓ /ask <question>", value: "ถาม programming" },
-      { name: "─────────────────", value: "**GitHub Commands**" },
-      { name: "📂 /gh-list <repo> [path]", value: "ดูไฟล์ใน repo" },
-      { name: "📄 /gh-read <repo> <path>", value: "อ่านไฟล์จาก GitHub" },
-      { name: "✏️ /gh-edit <repo> <path> <instruction>", value: "AI แก้ไขไฟล์แล้ว push เลย" },
-      { name: "➕ /gh-create <repo> <path> <description>", value: "สร้างไฟล์ใหม่" },
+      { name: "🗑️ /clear", value: "ล้างประวัติ" },
+      { name: "─────────────────", value: `**GitHub Commands** ${ghReady ? "✅ พร้อมใช้" : "⚠️ ยังไม่ได้เชื่อม — ใช้ /gh-setup"}` },
+      { name: "📂 /gh-list <repo>", value: "ดูไฟล์ใน repo" },
+      { name: "📄 /gh-read <repo> <path>", value: "อ่านไฟล์" },
+      { name: "✏️ /gh-edit <repo> <path>", value: "AI แก้ไฟล์แล้ว push" },
+      { name: "➕ /gh-create <repo> <path>", value: "สร้างไฟล์ใหม่แล้ว push" },
+      { name: "🔧 /gh-setup", value: "ดูวิธีเชื่อม GitHub App" },
     ).setTimestamp()] });
+  }
+
+  if (commandName === "gh-login") {
+    const modal = new ModalBuilder().setCustomId("modal_ghlogin").setTitle("🔑 เชื่อม GitHub Account");
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("pat")
+          .setLabel("Personal Access Token (ghp_xxxxxxxx)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder("ghp_xxxxxxxxxxxxxxxxxxxx")
+      )
+    );
+    return interaction.showModal(modal);
+  }
+
+  if (commandName === "gh-logout") {
+    removeUserToken(user.id);
+    return interaction.editReply({ ephemeral: true, embeds: [new EmbedBuilder().setColor(0xef4444).setTitle("👋 ตัดการเชื่อมต่อแล้ว").setDescription("ลบ GitHub token ออกแล้วครับ").setTimestamp()] });
+  }
+
+  if (commandName === "gh-repos") {
+    try {
+      const repos = await ghListRepos(user.id);
+      const lines = repos.map(r => {
+        const icon = r.private ? "🔒" : "🌐";
+        const lang = r.language ? ` \`${r.language}\`` : "";
+        const stars = r.stargazers_count > 0 ? ` ⭐${r.stargazers_count}` : "";
+        return `${icon} **[${r.name}](${r.html_url})**${lang}${stars}`;
+      }).join("\n");
+
+      const pat = getUserToken(user.id);
+      const kit = await getOctokit(user.id);
+      let username = "Unknown";
+      try { const { data } = await kit.users.getAuthenticated(); username = data.login; } catch {}
+
+      return interaction.editReply({ embeds: [new EmbedBuilder()
+        .setColor(0x24292e)
+        .setAuthor({ name: username, iconURL: `https://github.com/${username}.png` })
+        .setTitle(`📁 Repositories ของ ${username}`)
+        .setDescription(lines || "ไม่มี repo")
+        .setFooter({ text: `${repos.length} repos • อัปเดตล่าสุด` })
+        .setTimestamp()
+      ]});
+    } catch (err) {
+      return interaction.editReply(`❌ ${err.message}`);
+    }
+  }
+
+  if (commandName === "gh-setup") {
+    return interaction.editReply({ embeds: [
+      new EmbedBuilder()
+        .setColor(0x24292e)
+        .setTitle("🔧 วิธีเชื่อม GitHub App กับ Skibidri Code")
+        .addFields(
+          { name: "1️⃣ สร้าง GitHub App", value: "ไปที่ github.com/settings/apps → **New GitHub App**\n• ชื่อ: `Skibidri-code`\n• Permissions → Contents: **Read & Write**" },
+          { name: "2️⃣ หา App ID", value: "อยู่ในหน้า General ของ App ที่สร้างครับ เช่น `4276194`" },
+          { name: "3️⃣ Generate Private Key", value: "เลื่อนลงหา **Private keys** → **Generate a private key**\nโหลดไฟล์ `.pem` มาเก็บไว้" },
+          { name: "4️⃣ Install App & หา Installation ID", value: "กด **Install App** → เลือก Org/User → กำหนด repo\nดู URL: `github.com/settings/installations/xxxxxxxxx`\nเลขท้ายคือ Installation ID ครับ" },
+          { name: "5️⃣ ตั้งค่า ENV บน Termux", value: "```bash\n# อัปโหลด .pem ขึ้น Termux แล้วรัน\nexport GITHUB_APP_ID=\"ใส่app_id\"\nexport GITHUB_INSTALLATION_ID=\"ใส่installation_id\"\nexport GITHUB_PRIVATE_KEY=\"$(cat ~/private-key.pem | tr '\\n' '|')\"\n\n# บันทึกถาวร\necho 'export GITHUB_APP_ID=\"...\"' >> ~/.bashrc\necho 'export GITHUB_INSTALLATION_ID=\"...\"' >> ~/.bashrc\necho \"export GITHUB_PRIVATE_KEY=\\\"$(cat ~/private-key.pem | tr '\\n' '|')\\\"\" >> ~/.bashrc\nsource ~/.bashrc\npm2 restart skibidri-code --update-env\n```" },
+        )
+        .setFooter({ text: "หลังตั้งค่าแล้วลอง /home เพื่อเช็คสถานะครับ ✅" })
+        .setTimestamp()
+    ]});
   }
 
   if (commandName === "model") return interaction.editReply(`🤖 โมเดล: \`${MODEL}\` ผ่าน Groq`);
