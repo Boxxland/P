@@ -149,8 +149,19 @@ async function ghListFiles(owner, repo, dirPath = "", userId = null) {
 async function ghListRepos(userId = null) {
   const kit = await getOctokit(userId);
   if (!kit) throw new Error("กรุณา login ด้วย /gh-login ก่อนครับ");
-  const res = await kit.repos.listForAuthenticatedUser({ per_page: 30, sort: "updated" });
-  return res.data;
+  try {
+    // ถ้ามี PAT ของ user ใช้ listForAuthenticatedUser
+    if (userId && getUserToken(userId)) {
+      const res = await kit.repos.listForAuthenticatedUser({ per_page: 30, sort: "updated" });
+      return res.data;
+    }
+    // ถ้าเป็น App token ใช้ listForOrg แทน
+    const res = await kit.repos.listForOrg({ org: "Boxxland", per_page: 30, sort: "updated" });
+    return res.data;
+  } catch {
+    const res = await kit.repos.listForOrg({ org: "Boxxland", per_page: 30, sort: "updated" });
+    return res.data;
+  }
 }
 
 // ─── Groq API ─────────────────────────────────────────────────────────────────
@@ -221,10 +232,11 @@ const commands = [
     .addStringOption(o => o.setName("repo").setDescription("owner/repo เช่น Boxxland/6").setRequired(true))
     .addStringOption(o => o.setName("path").setDescription("path ไฟล์ เช่น index.js").setRequired(true)),
 
+  new SlashCommandBuilder().setName("gh-help").setDescription("วิธีใช้ GitHub commands สำหรับผู้ใช้ทั่วไป"),
   new SlashCommandBuilder().setName("gh-login").setDescription("เชื่อมบัญชี GitHub ด้วย Personal Access Token"),
   new SlashCommandBuilder().setName("gh-logout").setDescription("ตัดการเชื่อมต่อ GitHub"),
   new SlashCommandBuilder().setName("gh-repos").setDescription("ดูรายการ repo ของคุณ"),
-  new SlashCommandBuilder().setName("gh-setup").setDescription("วิธีเชื่อม GitHub App กับ Skibidri Code"),
+  new SlashCommandBuilder().setName("gh-setup").setDescription("วิธีตั้งค่า GitHub App (Admin)").setDefaultMemberPermissions("8"),
   new SlashCommandBuilder().setName("gh-list").setDescription("ดูไฟล์ใน GitHub repo")
     .addStringOption(o => o.setName("repo").setDescription("owner/repo").setRequired(true))
     .addStringOption(o => o.setName("path").setDescription("folder path (ว่างคือ root)").setRequired(false)),
@@ -456,6 +468,23 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (!interaction.isChatInputCommand()) return;
+
+  // ── Modal commands ต้อง showModal ก่อน deferReply เสมอ ───────────────────
+  if (interaction.commandName === "gh-login") {
+    const modal = new ModalBuilder().setCustomId("modal_ghlogin").setTitle("🔑 เชื่อม GitHub Account");
+    modal.addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("pat")
+          .setLabel("Personal Access Token (ghp_xxxxxxxx)")
+          .setStyle(TextInputStyle.Short)
+          .setRequired(true)
+          .setPlaceholder("ghp_xxxxxxxxxxxxxxxxxxxx")
+      )
+    );
+    return interaction.showModal(modal);
+  }
+
   await interaction.deferReply();
 
   const { commandName, user } = interaction;
@@ -493,19 +522,26 @@ client.on("interactionCreate", async (interaction) => {
     ).setTimestamp()] });
   }
 
-  if (commandName === "gh-login") {
-    const modal = new ModalBuilder().setCustomId("modal_ghlogin").setTitle("🔑 เชื่อม GitHub Account");
-    modal.addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("pat")
-          .setLabel("Personal Access Token (ghp_xxxxxxxx)")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setPlaceholder("ghp_xxxxxxxxxxxxxxxxxxxx")
-      )
-    );
-    return interaction.showModal(modal);
+  if (commandName === "gh-help") {
+    const pat = getUserToken(user.id);
+    return interaction.editReply({ embeds: [
+      new EmbedBuilder()
+        .setColor(0x24292e)
+        .setTitle("🐙 GitHub Commands — คู่มือผู้ใช้")
+        .setDescription(pat ? "✅ คุณเชื่อม GitHub แล้ว พร้อมใช้งานครับ!" : "⚠️ ยังไม่ได้เชื่อม GitHub — ใช้ `/gh-login` ก่อนครับ")
+        .addFields(
+          { name: "🔑 /gh-login", value: "เชื่อมบัญชี GitHub ของคุณด้วย Personal Access Token\n**วิธีสร้าง Token:** github.com/settings/tokens → Generate new token → เลือก `repo` → Copy" },
+          { name: "👋 /gh-logout", value: "ตัดการเชื่อมต่อ GitHub" },
+          { name: "📁 /gh-repos", value: "ดูรายการ repo ทั้งหมดของคุณ" },
+          { name: "📂 /gh-list <repo> [path]", value: "ดูไฟล์ใน repo เช่น `/gh-list Boxxland/6`" },
+          { name: "📄 /gh-read <repo> <path>", value: "อ่านไฟล์ เช่น `/gh-read Boxxland/6 index.js`" },
+          { name: "✏️ /gh-edit <repo> <path> <instruction>", value: "ให้ AI แก้ไฟล์แล้ว push เลย\nเช่น `/gh-edit Boxxland/6 index.js เพิ่ม error handling`" },
+          { name: "➕ /gh-create <repo> <path> <description>", value: "ให้ AI สร้างไฟล์ใหม่แล้ว push\nเช่น `/gh-create Boxxland/6 utils/helper.js ฟังก์ชันช่วยจัดการ string`" },
+          { name: "⚡ /home → Code Now", value: "เขียนโค้ดและ push ทันทีผ่านปุ่มในหน้าหลัก" },
+        )
+        .setFooter({ text: "Token เก็บไว้ local เท่านั้น ไม่มีใครเห็นครับ 🔒" })
+        .setTimestamp()
+    ]});
   }
 
   if (commandName === "gh-logout") {
@@ -542,6 +578,9 @@ client.on("interactionCreate", async (interaction) => {
   }
 
   if (commandName === "gh-setup") {
+    if (!interaction.memberPermissions?.has("Administrator")) {
+      return interaction.editReply({ content: "❌ คำสั่งนี้ใช้ได้เฉพาะ Admin ครับ", ephemeral: true });
+    }
     return interaction.editReply({ embeds: [
       new EmbedBuilder()
         .setColor(0x24292e)
